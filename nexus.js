@@ -1,8 +1,19 @@
 const BASE_URL = "https://anime.nexus";
+const API_BASE = "https://api.anime.nexus";
 
 async function getHtml(url, headers = {}) {
     const response = await fetchv2(url, headers);
     return await response.text();
+}
+
+async function getJson(url, headers = {}) {
+    const response = await fetchv2(url, {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": BASE_URL + "/",
+        "Accept": "application/json, text/plain, */*",
+        ...headers
+    });
+    return await response.json();
 }
 
 function absUrl(url) {
@@ -70,58 +81,72 @@ function uniqueBy(items, keyFn) {
 
 async function searchResults(keyword) {
     try {
-        const searchUrls = [
-            `${BASE_URL}/search?keyword=${encodeURIComponent(keyword)}`,
-            `${BASE_URL}/search?q=${encodeURIComponent(keyword)}`,
-            `${BASE_URL}/?keyword=${encodeURIComponent(keyword)}`
-        ];
+        const url =
+            `${API_BASE}/api/anime/shows` +
+            `?search=${encodeURIComponent(keyword)}` +
+            `&sortBy=${encodeURIComponent("name asc")}` +
+            `&page=1` +
+            `&includes[]=poster` +
+            `&includes[]=genres` +
+            `&hasVideos=1`;
 
-        for (const url of searchUrls) {
-            try {
-                const html = await getHtml(url);
-                const doc = parseHtml(html);
+        const json = await getJson(url);
 
-                const anchors = [...doc.querySelectorAll('a[href*="/series/"]')];
-                const results = anchors.map(a => {
-                    const href = attr(a, "href");
-                    const title =
-                        attr(a, "title") ||
-                        attr(a.querySelector("img"), "alt") ||
-                        text(a);
+        const rawItems =
+            json?.data ||
+            json?.results ||
+            json?.items ||
+            [];
 
-                    const image =
-                        bestImageFromNode(a) ||
-                        bestImageFromNode(a.parentElement) ||
-                        bestImageFromNode(a.closest("div"));
+        const results = rawItems.map(item => {
+            const slug = item?.slug || item?.attributes?.slug || "";
+            const id = item?.id || item?.uuid || item?.attributes?.id || "";
+            const name =
+                item?.name ||
+                item?.title ||
+                item?.attributes?.name ||
+                item?.attributes?.title ||
+                "Unknown";
 
-                    return {
-                        title: decodeHtmlEntities(title),
-                        image: image,
-                        href: href
-                    };
-                }).filter(x =>
-                    x.href &&
-                    x.title &&
-                    x.title.toLowerCase().includes(keyword.toLowerCase())
-                );
+            const altName =
+                item?.englishName ||
+                item?.romajiName ||
+                item?.nativeName ||
+                item?.attributes?.englishName ||
+                item?.attributes?.romajiName ||
+                item?.attributes?.nativeName ||
+                "";
 
-                const deduped = uniqueBy(results, x => x.href);
-                if (deduped.length) {
-                    return JSON.stringify(deduped);
-                }
-            } catch (e) {
-                console.log("search failed for", url, e);
+            const poster =
+                item?.poster?.url ||
+                item?.poster?.original ||
+                item?.poster?.medium ||
+                item?.image ||
+                item?.thumbnail ||
+                item?.attributes?.poster?.url ||
+                "";
+
+            let href = "";
+            if (id && slug) {
+                href = `/series/${id}/${slug}`;
+            } else if (slug) {
+                href = `/series/${slug}`;
             }
-        }
 
-        return JSON.stringify([]);
+            return {
+                title: decodeHtmlEntities(name),
+                image: poster || "",
+                href,
+                link: href,
+                url: href,
+                alias: decodeHtmlEntities(altName)
+            };
+        }).filter(x => x.href && x.title);
+
+        return JSON.stringify(uniqueBy(results, x => x.href));
     } catch (err) {
         console.error(err);
-        return JSON.stringify([{
-            title: "Error",
-            image: "Error",
-            href: "Error"
-        }]);
+        return JSON.stringify([]);
     }
 }
 
@@ -214,17 +239,10 @@ async function extractEpisodes(url) {
 
         results = uniqueBy(results, x => x.href).sort((a, b) => a.number - b.number);
 
-        if (!results.length) {
-            return JSON.stringify([]);
-        }
-
         return JSON.stringify(results);
     } catch (err) {
         console.error(err);
-        return JSON.stringify([{
-            href: "Error",
-            number: "Error"
-        }]);
+        return JSON.stringify([]);
     }
 }
 
@@ -240,7 +258,6 @@ async function extractStreamUrl(url) {
         const streams = [];
         let subtitles = "";
 
-        // Direct <video> sources
         const directSources = [...doc.querySelectorAll("video source[src]")];
         for (const source of directSources) {
             const streamUrl = attr(source, "src");
@@ -256,7 +273,6 @@ async function extractStreamUrl(url) {
             });
         }
 
-        // Subtitle tracks
         const trackEls = [...doc.querySelectorAll('track[kind="captions"], track[kind="subtitles"]')];
         const englishTrack = trackEls.find(t =>
             /english/i.test(attr(t, "label")) || /en/i.test(attr(t, "srclang"))
@@ -267,7 +283,6 @@ async function extractStreamUrl(url) {
             subtitles = attr(trackEls[0], "src");
         }
 
-        // Iframe fallback
         if (!streams.length) {
             const iframe = doc.querySelector("iframe[src]");
             if (iframe) {
@@ -300,7 +315,6 @@ async function extractStreamUrl(url) {
             }
         }
 
-        // Raw HTML fallback
         if (!streams.length) {
             const matches = [
                 ...html.matchAll(/https?:\/\/[^"'\\\s]+\.m3u8[^"'\\\s]*/g),
