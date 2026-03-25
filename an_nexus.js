@@ -4,18 +4,12 @@
   "author": {
     "name": "Tobias"
   },
-  "version": "1.0.1",
-  "language": "English (SUB/DUB)",
+  "version": "1.0.2",
+  "language": "English",
   "streamType": "HLS",
   "quality": "1080p",
   "baseUrl": "https://anime.nexus",
-  "scriptUrl": "https://raw.githubusercontent.com/Hikaru4v/nexus/main/nexus.js",
+  "scriptUrl": "https://raw.githubusercontent.com/Hikaru4v/nexus/refs/heads/main/nexus.js",
   "type": "anime",
-  "asyncJS": true,
-  "softsub": true,
-  "downloadSupport": true,
-  "supportsMojuru": true,
-  "supportsDartotsu": true,
-  "supportsSora": true,
-  "supportsLuna": true
+  "asyncJS": true
 }
