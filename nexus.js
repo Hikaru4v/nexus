@@ -70,58 +70,50 @@ function uniqueBy(items, keyFn) {
 
 async function searchResults(keyword) {
     try {
-        const searchUrls = [
-            `${BASE_URL}/search?keyword=${encodeURIComponent(keyword)}`,
-            `${BASE_URL}/search?q=${encodeURIComponent(keyword)}`,
-            `${BASE_URL}/?keyword=${encodeURIComponent(keyword)}`
-        ];
+        const url =
+            `${API_BASE}/api/anime/shows` +
+            `?search=${encodeURIComponent(keyword)}` +
+            `&sortBy=${encodeURIComponent("name asc")}` +
+            `&page=1` +
+            `&includes[]=poster` +
+            `&includes[]=genres` +
+            `&hasVideos=1`;
 
-        for (const url of searchUrls) {
-            try {
-                const html = await getHtml(url);
-                const doc = parseHtml(html);
+        const json = await getJson(url);
 
-                const anchors = [...doc.querySelectorAll('a[href*="/series/"]')];
-                const results = anchors.map(a => {
-                    const href = attr(a, "href");
-                    const title =
-                        attr(a, "title") ||
-                        attr(a.querySelector("img"), "alt") ||
-                        text(a);
+        const rawItems = json?.data || [];
 
-                    const image =
-                        bestImageFromNode(a) ||
-                        bestImageFromNode(a.parentElement) ||
-                        bestImageFromNode(a.closest("div"));
+        const results = rawItems.map(item => {
+            const slug = item?.slug || "";
+            const id = item?.id || "";
+            const name = item?.name || item?.title || "Unknown";
+            const altName = item?.name_alt || "";
 
-                    return {
-                        title: decodeHtmlEntities(title),
-                        image: image,
-                        href: href
-                    };
-                }).filter(x =>
-                    x.href &&
-                    x.title &&
-                    x.title.toLowerCase().includes(keyword.toLowerCase())
-                );
+            const poster =
+                item?.poster?.resized?.["240x360"] ||
+                item?.poster?.resized?.["480x720"] ||
+                item?.poster?.resized?.["640x960"] ||
+                item?.poster?.resized?.["1560x2340"] ||
+                "";
 
-                const deduped = uniqueBy(results, x => x.href);
-                if (deduped.length) {
-                    return JSON.stringify(deduped);
-                }
-            } catch (e) {
-                console.log("search failed for", url, e);
-            }
-        }
+            const href = id && slug
+                ? `/series/${id}/${slug}`
+                : slug
+                    ? `/series/${slug}`
+                    : "";
 
-        return JSON.stringify([]);
+            return {
+                title: decodeHtmlEntities(name),
+                image: absUrl(poster),
+                href: absUrl(href),
+                alias: decodeHtmlEntities(altName)
+            };
+        }).filter(x => x.href && x.title && x.image);
+
+        return JSON.stringify(uniqueBy(results, x => x.href));
     } catch (err) {
-        console.error(err);
-        return JSON.stringify([{
-            title: "Error",
-            image: "Error",
-            href: "Error"
-        }]);
+        console.error("searchResults error:", err);
+        return JSON.stringify([]);
     }
 }
 
