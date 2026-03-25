@@ -1,28 +1,122 @@
+const BASE_URL = "https://anime.nexus";
+
+async function getHtml(url, headers = {}) {
+    const response = await fetchv2(url, headers);
+    return await response.text();
+}
+
+function absUrl(url) {
+    if (!url) return "";
+    if (/^https?:\/\//i.test(url)) return url;
+    return BASE_URL + (url.startsWith("/") ? url : "/" + url);
+}
+
+function parseHtml(html) {
+    return new DOMParser().parseFromString(html, "text/html");
+}
+
+function text(el) {
+    return el?.textContent?.trim?.() || "";
+}
+
+function attr(el, name) {
+    return el?.getAttribute?.(name)?.trim?.() || "";
+}
+
+function decodeHtmlEntities(str) {
+    if (!str) return "";
+    return str
+        .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(dec))
+        .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&nbsp;/g, " ");
+}
+
+function bestImageFromNode(node) {
+    if (!node) return "";
+    const img = node.matches?.("img") ? node : node.querySelector?.("img");
+    if (!img) return "";
+
+    const src = attr(img, "src");
+    const dataSrc = attr(img, "data-src");
+    const srcset = attr(img, "srcset");
+
+    if (src) return src;
+    if (dataSrc) return dataSrc;
+
+    if (srcset) {
+        const first = srcset
+            .split(",")
+            .map(x => x.trim().split(/\s+/)[0])
+            .find(Boolean);
+        if (first) return first;
+    }
+
+    return "";
+}
+
+function uniqueBy(items, keyFn) {
+    const seen = new Set();
+    return items.filter(item => {
+        const key = keyFn(item);
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
 async function searchResults(keyword) {
-    const results = [];
-
     try {
-        const response = await fetchv2("https://aniwatchtv.to/search?keyword=" + encodeURIComponent(keyword));
-        const html = await response.text();
+        const searchUrls = [
+            `${BASE_URL}/search?keyword=${encodeURIComponent(keyword)}`,
+            `${BASE_URL}/search?q=${encodeURIComponent(keyword)}`,
+            `${BASE_URL}/?keyword=${encodeURIComponent(keyword)}`
+        ];
 
-        const blocks = html.split('<div class="flw-item">').slice(1);
+        for (const url of searchUrls) {
+            try {
+                const html = await getHtml(url);
+                const doc = parseHtml(html);
 
-        for (const block of blocks) {
-            const href = block.match(/<a href="([^"]+)"/);
-            const image = block.match(/data-src="([^"]+)"/) || block.match(/src="([^"]+)"/);
-            const title = block.match(/title="([^"]+?)"/);
+                const anchors = [...doc.querySelectorAll('a[href*="/series/"]')];
+                const results = anchors.map(a => {
+                    const href = attr(a, "href");
+                    const title =
+                        attr(a, "title") ||
+                        attr(a.querySelector("img"), "alt") ||
+                        text(a);
 
-            if (href && image && title) {
-                results.push({
-                    title: decodeHtmlEntities(title[1].trim()),
-                    image: image[1].trim(),
-                    href: href[1].trim()
-                });
+                    const image =
+                        bestImageFromNode(a) ||
+                        bestImageFromNode(a.parentElement) ||
+                        bestImageFromNode(a.closest("div"));
+
+                    return {
+                        title: decodeHtmlEntities(title),
+                        image: image,
+                        href: href
+                    };
+                }).filter(x =>
+                    x.href &&
+                    x.title &&
+                    x.title.toLowerCase().includes(keyword.toLowerCase())
+                );
+
+                const deduped = uniqueBy(results, x => x.href);
+                if (deduped.length) {
+                    return JSON.stringify(deduped);
+                }
+            } catch (e) {
+                console.log("search failed for", url, e);
             }
         }
 
-        return JSON.stringify(results);
+        return JSON.stringify([]);
     } catch (err) {
+        console.error(err);
         return JSON.stringify([{
             title: "Error",
             image: "Error",
@@ -33,181 +127,208 @@ async function searchResults(keyword) {
 
 async function extractDetails(url) {
     try {
-        const response = await fetchv2("https://aniwatchtv.to" + url);
-        const html = await response.text();
+        const fullUrl = absUrl(url);
+        const html = await getHtml(fullUrl);
+        const doc = parseHtml(html);
 
-        const descMatch = html.match(/<div class="film-description m-hide">[\s\S]*?<div class="text">\s*([\s\S]*?)\s*<\/div>/);
-        const dateMatch = html.match(/<strong>Released:\s*<\/strong>\s*([^<\n]+)/);
+        const title =
+            attr(doc.querySelector('meta[property="og:title"]'), "content") ||
+            attr(doc.querySelector('meta[name="twitter:title"]'), "content") ||
+            attr(doc.querySelector("a[title]"), "title") ||
+            text(doc.querySelector("h1")) ||
+            "N/A";
 
-        const description = descMatch ? descMatch[1].trim() : "N/A";
-        const airdate = dateMatch ? dateMatch[1].trim() : "N/A";
+        const description =
+            attr(doc.querySelector('meta[property="og:description"]'), "content") ||
+            attr(doc.querySelector('meta[name="description"]'), "content") ||
+            text(doc.querySelector(".film-description .text")) ||
+            [...doc.querySelectorAll("p")]
+                .map(p => text(p))
+                .find(t => t.length > 80) ||
+            "N/A";
+
+        let airdate = "N/A";
+        const yearNode = [...doc.querySelectorAll("span, div")]
+            .map(el => text(el))
+            .find(t => /^\d{4}$/.test(t));
+        if (yearNode) airdate = yearNode;
+
+        let aliases = "N/A";
+
+        try {
+            const jsonLdNodes = [...doc.querySelectorAll('script[type="application/ld+json"]')];
+            for (const node of jsonLdNodes) {
+                const raw = text(node);
+                if (!raw) continue;
+                const data = JSON.parse(raw);
+
+                if (data.alternateName) aliases = data.alternateName;
+                if (data.datePublished && airdate === "N/A") airdate = data.datePublished;
+            }
+        } catch (_) {}
 
         return JSON.stringify([{
-            description: description,
-            aliases: "N/A",
-            airdate: airdate
+            description: decodeHtmlEntities(description),
+            aliases: decodeHtmlEntities(aliases),
+            airdate: decodeHtmlEntities(airdate),
+            title: decodeHtmlEntities(title)
         }]);
-
     } catch (err) {
+        console.error(err);
         return JSON.stringify([{
             description: "Error",
             aliases: "Error",
-            airdate: "Error"
+            airdate: "Error",
+            title: "Error"
         }]);
     }
 }
 
 async function extractEpisodes(url) {
-    const results = [];
     try {
-        let watchUrl = url;
-        if (!/\/watch\//.test(watchUrl)) {
-            watchUrl = watchUrl.replace(/\/([^\/]+)$/, '/watch/$1');
+        const fullUrl = absUrl(url);
+        const html = await getHtml(fullUrl);
+        const doc = parseHtml(html);
+
+        const links = [...doc.querySelectorAll('a[href*="/watch/"], a[href*="/episode/"]')];
+        let results = links.map((a, index) => {
+            const href = attr(a, "href");
+            const rawText = text(a);
+
+            let number = null;
+
+            const textMatch = rawText.match(/episode\s*(\d+)/i);
+            const hrefMatch = href.match(/(?:episode|ep)[-\/]?(\d+)/i);
+            const endMatch = href.match(/\/(\d+)(?:\/)?$/);
+
+            if (textMatch) number = parseInt(textMatch[1], 10);
+            else if (hrefMatch) number = parseInt(hrefMatch[1], 10);
+            else if (endMatch) number = parseInt(endMatch[1], 10);
+            else number = index + 1;
+
+            return {
+                href,
+                number
+            };
+        }).filter(x => x.href);
+
+        results = uniqueBy(results, x => x.href).sort((a, b) => a.number - b.number);
+
+        if (!results.length) {
+            return JSON.stringify([]);
         }
-
-        const watchResp = await fetchv2("https://aniwatchtv.to" + watchUrl);
-        const watchHtml = await watchResp.text();
-        const idMatch = watchHtml.match(/<div[^>]+id="wrapper"[^>]+data-id="(\d+)"[^>]*>/);
-        if (!idMatch) throw new Error("movie_id not found");
-        const movieId = idMatch[1];
-
-        const epListResp = await fetchv2(`https://aniwatchtv.to/ajax/v2/episode/list/${movieId}`);
-        const epListJson = await epListResp.json();
-        const epHtml = epListJson.html;
-
-        const epRegex = /<a[^>]+class="ssl-item\s+ep-item"[^>]+data-number="(\d+)"[^>]+data-id="(\d+)"[^>]*>/g;
-            let match;
-            while ((match = epRegex.exec(epHtml)) !== null) {
-                results.push({
-                    href: match[2],
-                    number: parseInt(match[1], 10)
-                });
-            }
 
         return JSON.stringify(results);
     } catch (err) {
         console.error(err);
-        return JSON.stringify([{ id: "Error", href: "Error", number: "Error", title: "Error" }]);
+        return JSON.stringify([{
+            href: "Error",
+            number: "Error"
+        }]);
     }
 }
 
-async function extractStreamUrl(ID) {
+async function extractStreamUrl(url) {
     try {
-        const serversResp = await fetchv2(`https://aniwatchtv.to/ajax/v2/episode/servers?episodeId=${ID}`);
-        const serversJson = await serversResp.json();
-        const serversHtml = serversJson.html;
-        
-        const subServerMatch = serversHtml.match(/<div class="item server-item" data-type="sub" data-id="(\d+)"/);
-        const dubServerMatch = serversHtml.match(/<div class="item server-item" data-type="dub" data-id="(\d+)"/);
-        
-        const subServerId = subServerMatch ? subServerMatch[1] : null;
-        const dubServerId = dubServerMatch ? dubServerMatch[1] : null;
-        
-        if (!subServerId && !dubServerId) {
-            return "https://error.org/";
+        const fullUrl = absUrl(url);
+        const html = await getHtml(fullUrl, {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": BASE_URL + "/"
+        });
+
+        const doc = parseHtml(html);
+        const streams = [];
+        let subtitles = "";
+
+        // Direct <video> sources
+        const directSources = [...doc.querySelectorAll("video source[src]")];
+        for (const source of directSources) {
+            const streamUrl = attr(source, "src");
+            if (!streamUrl) continue;
+
+            streams.push({
+                title: "STREAM",
+                streamUrl,
+                headers: {
+                    "Referer": fullUrl,
+                    "User-Agent": "Mozilla/5.0"
+                }
+            });
         }
-        
-        const headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:146.0) Gecko/20100101 Firefox/146.0",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Referer": "https://aniwatchtv.to/"
-        };
-        
-        const processServer = async (serverId, title) => {
-            try {
-                const sourcesResp = await fetchv2(`https://aniwatchtv.to/ajax/v2/episode/sources?id=${serverId}`);
-                const sourcesJson = await sourcesResp.json();
-                const iframeUrl = sourcesJson.link;
-                
-                if (!iframeUrl) return null;
-                
-                const iframeResp = await fetchv2(iframeUrl, headers);
-                const iframeHtml = await iframeResp.text();
-                
-                const videoTagMatch = iframeHtml.match(/data-id="([^"]+)"/);
-                if (!videoTagMatch) return null;
-                const fileId = videoTagMatch[1];
-                
-                const nonceMatch = iframeHtml.match(/\b[a-zA-Z0-9]{48}\b/) || 
-                                  iframeHtml.match(/\b([a-zA-Z0-9]{16})\b.*?\b([a-zA-Z0-9]{16})\b.*?\b([a-zA-Z0-9]{16})\b/);
-                if (!nonceMatch) return null;
-                
-                const nonce = nonceMatch.length === 4 ? 
-                             nonceMatch[1] + nonceMatch[2] + nonceMatch[3] : 
-                             nonceMatch[0];
-                
-                const urlParts = iframeUrl.split('/');
-                const protocol = iframeUrl.startsWith('https') ? 'https:' : 'http:';
-                const hostname = urlParts[2];
-                const defaultDomain = `${protocol}//${hostname}/`;
-                
-                const getSourcesUrl = `${defaultDomain}embed-2/v3/e-1/getSources?id=${fileId}&_k=${nonce}`;
-                const getSourcesResp = await fetchv2(getSourcesUrl, headers);
-                const getSourcesJson = await getSourcesResp.json();
-                console.log(JSON.stringify(getSourcesJson));
-                const videoUrl = getSourcesJson.sources?.[0]?.file || "";
-                if (!videoUrl) return null;
-                
-                const streamHeaders = {
-                    "Referer": defaultDomain,
-                    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
-                };
-                
-                return {
-                    title: title,
-                    streamUrl: videoUrl,
-                    headers: streamHeaders,
-                    sourcesData: getSourcesJson
-                };
-            } catch (e) {
-                console.log(`${title} failed:`, e);
-                return null;
+
+        // Subtitle tracks
+        const trackEls = [...doc.querySelectorAll('track[kind="captions"], track[kind="subtitles"]')];
+        const englishTrack = trackEls.find(t =>
+            /english/i.test(attr(t, "label")) || /en/i.test(attr(t, "srclang"))
+        );
+        if (englishTrack) {
+            subtitles = attr(englishTrack, "src");
+        } else if (trackEls[0]) {
+            subtitles = attr(trackEls[0], "src");
+        }
+
+        // Iframe fallback
+        if (!streams.length) {
+            const iframe = doc.querySelector("iframe[src]");
+            if (iframe) {
+                const iframeUrl = absUrl(attr(iframe, "src"));
+                const iframeHtml = await getHtml(iframeUrl, {
+                    "User-Agent": "Mozilla/5.0",
+                    "Referer": fullUrl
+                });
+
+                const matches = [
+                    ...iframeHtml.matchAll(/https?:\/\/[^"'\\\s]+\.m3u8[^"'\\\s]*/g),
+                    ...iframeHtml.matchAll(/https?:\/\/[^"'\\\s]+\.mp4[^"'\\\s]*/g)
+                ].map(m => m[0]);
+
+                for (const match of [...new Set(matches)]) {
+                    streams.push({
+                        title: "STREAM",
+                        streamUrl: match,
+                        headers: {
+                            "Referer": iframeUrl,
+                            "User-Agent": "Mozilla/5.0"
+                        }
+                    });
+                }
+
+                if (!subtitles) {
+                    const subMatch = iframeHtml.match(/https?:\/\/[^"'\\\s]+\.(vtt|srt)[^"'\\\s]*/i);
+                    if (subMatch) subtitles = subMatch[0];
+                }
             }
-        };
-        
-        const serverPromises = [];
-        if (subServerId) serverPromises.push(processServer(subServerId, "SUB"));
-        if (dubServerId) serverPromises.push(processServer(dubServerId, "DUB"));
-        
-        const results = await Promise.all(serverPromises);
-        const streams = results.filter(r => r !== null);
-        
-        if (streams.length === 0) {
+        }
+
+        // Raw HTML fallback
+        if (!streams.length) {
+            const matches = [
+                ...html.matchAll(/https?:\/\/[^"'\\\s]+\.m3u8[^"'\\\s]*/g),
+                ...html.matchAll(/https?:\/\/[^"'\\\s]+\.mp4[^"'\\\s]*/g)
+            ].map(m => m[0]);
+
+            for (const match of [...new Set(matches)]) {
+                streams.push({
+                    title: "STREAM",
+                    streamUrl: match,
+                    headers: {
+                        "Referer": fullUrl,
+                        "User-Agent": "Mozilla/5.0"
+                    }
+                });
+            }
+        }
+
+        if (!streams.length) {
             return "https://error.org/";
         }
-        
-        const englishTrack = streams[0].sourcesData.tracks?.find(t => t.kind === "captions" && t.label === "English");
-        const subtitle = englishTrack ? englishTrack.file : "";
-        
-        const finalStreams = streams.map(s => ({
-            title: s.title,
-            streamUrl: s.streamUrl,
-            headers: s.headers
-        }));
-        console.log(JSON.stringify({
-            streams: finalStreams,
-            subtitle: subtitle
-        }));
+
         return JSON.stringify({
-            streams: finalStreams,
-            subtitles: subtitle
+            streams,
+            subtitles
         });
     } catch (err) {
         console.error(err);
         return "https://error.org/";
     }
-}
-
-function decodeHtmlEntities(text) {
-  if (!text) {
-    return "";
-  }
-  return text
-    .replace(/&#(\d+);/g, (match, dec) => String.fromCharCode(dec))
-    .replace(/&#x([0-9a-fA-F]+);/g, (match, hex) => String.fromCharCode(parseInt(hex, 16)))
-    .replace(/&quot;/g, "\"")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ");
 }
