@@ -1,26 +1,9 @@
 const BASE_URL = "https://anime.nexus";
+const API_BASE = "https://api.anime.nexus";
 
-async function getHtml(url, headers = {}) {
-    const response = await fetchv2(url, headers);
-    return await response.text();
-}
-
-function absUrl(url) {
-    if (!url) return "";
-    if (/^https?:\/\//i.test(url)) return url;
-    return BASE_URL + (url.startsWith("/") ? url : "/" + url);
-}
-
-function parseHtml(html) {
-    return new DOMParser().parseFromString(html, "text/html");
-}
-
-function text(el) {
-    return el?.textContent?.trim?.() || "";
-}
-
-function attr(el, name) {
-    return el?.getAttribute?.(name)?.trim?.() || "";
+async function getJson(url) {
+    const response = await fetchv2(url);
+    return await response.json();
 }
 
 function decodeHtmlEntities(str) {
@@ -35,29 +18,6 @@ function decodeHtmlEntities(str) {
         .replace(/&nbsp;/g, " ");
 }
 
-function bestImageFromNode(node) {
-    if (!node) return "";
-    const img = node.matches?.("img") ? node : node.querySelector?.("img");
-    if (!img) return "";
-
-    const src = attr(img, "src");
-    const dataSrc = attr(img, "data-src");
-    const srcset = attr(img, "srcset");
-
-    if (src) return src;
-    if (dataSrc) return dataSrc;
-
-    if (srcset) {
-        const first = srcset
-            .split(",")
-            .map(x => x.trim().split(/\s+/)[0])
-            .find(Boolean);
-        if (first) return first;
-    }
-
-    return "";
-}
-
 function uniqueBy(items, keyFn) {
     const seen = new Set();
     return items.filter(item => {
@@ -69,18 +29,30 @@ function uniqueBy(items, keyFn) {
 }
 
 async function searchResults(keyword) {
-    return JSON.stringify([
-        {
-            title: "Mashle: Magic and Muscles",
+    try {
+        const url =
+            `${API_BASE}/api/anime/shows` +
+            `?search=${encodeURIComponent(keyword)}` +
+            `&sortBy=name%20asc` +
+            `&page=1` +
+            `&includes[]=poster` +
+            `&includes[]=genres` +
+            `&hasVideos=1`;
+
+        const json = await getJson(url);
+
+        const results = (json?.data || []).map(item => ({
+            title: decodeHtmlEntities(item?.name || "Unknown"),
             image: "",
-            href: "/series/999168fa-015b-4ad9-b738-f1207cbb9522/mashle-magic-and-muscles-5e37eec8031dc545f5ed"
-        },
-        {
-            title: "Mashle: Magic and Muscles - The Divine Visionary Candidate Exam Arc",
-            image: "",
-            href: "/series/99916bfd-3bbb-467a-8636-0049f2e27e82/mashle-magic-and-muscles-the-divine-visionary-candidate-exam-arc-b3e7309fa2893500261f"
-        }
-    ]);
+            href: `/series/${item?.id}/${item?.slug}`,
+            alias: decodeHtmlEntities(item?.name_alt || "")
+        })).filter(x => x.title && x.href);
+
+        return uniqueBy(results, x => x.href);
+    } catch (err) {
+        console.error("searchResults error:", err);
+        return [];
+    }
 }
 
 async function extractDetails(url) {
