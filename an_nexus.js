@@ -12,5 +12,11 @@
   "searchBaseUrl": "https://api.anime.nexus/api/anime/shows?search=%s&sortBy=name%20asc&page=1&includes%5B%5D=poster&includes%5B%5D=genres&hasVideos=1",
   "scriptUrl": "https://raw.githubusercontent.com/Hikaru4v/nexus/main/nexus.js",
   "type": "anime",
-  "asyncJS": true
+  "asyncJS": true,
+  "softsub": false,
+  "downloadSupport": false,
+  "supportsMojuru": true,
+  "supportsDartotsu": true,
+  "supportsSora": true,
+  "supportsLuna": true
 }
